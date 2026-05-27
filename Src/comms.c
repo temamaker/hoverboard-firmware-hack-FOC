@@ -29,9 +29,6 @@
 #include "util.h"
 #include "comms.h"
 
-#if defined(DEBUG_SERIAL_PROTOCOL)
-#if defined(DEBUG_SERIAL_PROTOCOL) && (defined(DEBUG_SERIAL_USART2) || defined(DEBUG_SERIAL_USART3))
-
 #ifdef CONTROL_ADC
   #define RAW_MIN 0
   #define RAW_MAX 4095
@@ -67,6 +64,12 @@ extern int16_t dc_curr;
 extern int16_t cmdL; 
 extern int16_t cmdR; 
 
+#if defined(CONTROL_SERIAL_USART2)
+extern UART_HandleTypeDef huart2;
+#endif
+#if defined(CONTROL_SERIAL_USART3)
+extern UART_HandleTypeDef huart3;
+#endif
 
 
 enum commandTypes {READ,WRITE};
@@ -75,11 +78,19 @@ enum commandTypes {READ,WRITE};
 // Function2 - Function with 2 parameter (e.g. SET PARAM XXXX)
 const command_entry commands[] = {
   // Type   ,Name      ,Function0         ,Function1       ,Function2      ,Help     
+    #if defined(DEBUG_SERIAL_PROTOCOL)
     {READ   ,"GET"     ,printAllParamDef  ,printParamDef   ,NULL           ,"Get Parameter/Variable"},
     {READ   ,"HELP"    ,printAllParamHelp ,printParamHelp  ,NULL           ,"Command/Parameter/Variable Help"},
     {READ   ,"WATCH"   ,NULL              ,watchParamVal   ,NULL           ,"Toggle Parameter/Variable Watch"},
     {WRITE  ,"SET"     ,NULL              ,NULL            ,setParamValExt ,"Set Parameter"},
     {WRITE  ,"INIT"    ,NULL              ,initParamVal    ,NULL           ,"Init Parameter from EEPROM or CONFIG.H"},
+    #else
+    {READ   ,"GET"     ,NULL              ,NULL            ,NULL           ,"Get Parameter/Variable"},
+    {READ   ,"HELP"    ,NULL              ,NULL            ,NULL           ,"Command/Parameter/Variable Help"},
+    {READ   ,"WATCH"   ,NULL              ,NULL            ,NULL           ,"Toggle Parameter/Variable Watch"},
+    {WRITE  ,"SET"     ,NULL              ,NULL            ,NULL           ,"Set Parameter"},
+    {WRITE  ,"INIT"    ,NULL              ,NULL            ,NULL           ,"Init Parameter from EEPROM or CONFIG.H"},
+    #endif
     {WRITE  ,"SAVE"    ,saveAllParamVal   ,NULL            ,NULL           ,"Save Parameters to EEPROM"},
 };
 
@@ -145,7 +156,7 @@ const parameter_entry params[] = {
 
 };
 
-
+//All errors that can be thrown back at the user through DEBUG PROTOCOL
 const char *errors[9] = {
   "Command not found", // Err1
   "Parameter not found", // Err2
@@ -160,6 +171,8 @@ const char *errors[9] = {
 };
 
 debug_command command;
+uint8_t command_usart_idx = 0;
+uint8_t command_is_binary = 0;
 int8_t watchParamList[MAX_PARAM_WATCH] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1}; 
 
 // Set Param with Value from external format
@@ -481,172 +494,192 @@ int8_t findParam(uint8_t *userCommand, uint32_t len){
   return -1; // Not found
 }
 
-// Parse and save the command to be executed
-void handle_input(uint8_t *userCommand, uint32_t len)
-{
+void send_parameter_setting_feedback(debug_command *cmd, uint8_t usart_idx){
+    // Create a static local copy to prevent a race condition with the main loop.
+    // The main loop could clear the semaphore on the global `command` struct
+    // while the DMA is still transmitting it, causing a checksum mismatch.
+    static debug_command tx_cmd;
+    tx_cmd = *cmd;
 
-  // If there is already an unprocessed command, exit
-  if (command.semaphore == 1) return;
-  if (*userCommand != '$') return; // reject if first character is not $ 
-  
-  // Check end of line
-  userCommand+=len-1; // Go to last char
-  if (*userCommand != '\n' && *userCommand != '\r'){
-    command.error = 7; // Error - End of line expected
-    return;
-  }
-  userCommand-=len-1; // Come back
-  userCommand++; // Skip $
-
-  int8_t  cindex = -1;
-  int8_t  pindex = -1;
-  uint8_t size   = 0;
-
-  // Find Command
-  cindex = findCommand(userCommand,len);
-  if (cindex == -1){
-    // Error - Command not found
-    command.error = 1;
-    return;
-  }
-
-  // Skip command characters
-  size = strlen(commands[cindex].name);
-  {len-=size;userCommand+=size;}
-  // Skip if space
-  if (*userCommand == 0x20){len-=1;userCommand+=1;}
-
-  if (*userCommand == '\n' || *userCommand == '\r'){
-    if (commands[cindex].callback_function0 != NULL){
-      // Command without parameter
-      command.semaphore = 1;
-      command.command_index = cindex;
-      command.param_index   = -1;
-      command.param_value   = 0;
-    }else{
-      command.error = 8; // Error - Parameter expected
+    // 1. Calculate the new checksum with the updated error/value fields
+    uint8_t *ptr = (uint8_t *)&tx_cmd;
+    uint16_t calculated_sum = 0;
+    size_t payload_size = sizeof(debug_command) - sizeof(tx_cmd.checksum);
+    for(size_t i = 0; i < payload_size; i++) {
+        calculated_sum += ptr[i];
     }
-    return;
-  }
+    tx_cmd.checksum = calculated_sum;
 
-  // Find parameter
-  pindex = findParam(userCommand,len);
-  if (pindex == -1){
-    // Error - Parameter not found
-    command.error = 2;
-    return;
-  }
-
-  // Skip parameter characters
-  size = strlen(params[pindex].name);
-  {len-=size;userCommand+=size;}
-  // Skip if space
-  if (*userCommand == 0x20){len-=1;userCommand+=1;}
-   
-  if (commands[cindex].type == WRITE && params[pindex].type == VARIABLE){
-    // Error - This command cannot be used with a Variable
-    command.error = 3;
-    return;
-  }
-  
-  if (commands[cindex].callback_function1 != NULL){
-    if (*userCommand == '\n' || *userCommand == '\r'){
-      // Command with parameter
-      command.semaphore = 1;
-      command.command_index = cindex;
-      command.param_index   = pindex;
-      command.param_value   = 0;
-    }else{
-      command.error = 7; // Error - End of line expected
+    // 2. Transmit confirmation frame back on the exact port it was received
+    if (usart_idx == 2) {
+        #if defined(CONTROL_SERIAL_USART2)
+        HAL_UART_Transmit_DMA(&huart2, (uint8_t *)&tx_cmd, sizeof(debug_command));
+        #endif
+    } else if (usart_idx == 3) {
+        #if defined(CONTROL_SERIAL_USART3)
+        HAL_UART_Transmit_DMA(&huart3, (uint8_t *)&tx_cmd, sizeof(debug_command));
+        #endif
     }
-    return;
-  }
-  
-  int32_t value = 0;
-  int8_t  sign  = 1;
-  int8_t  count = 0;
-
-  // Read sign
-  if (*userCommand == '-'){len-=1;userCommand+=1;sign =-1;} 
-  // Read value
-  for (value=0; (unsigned)*userCommand-'0'<10; userCommand++){
-    value = 10*value+(*userCommand-'0');
-    count++;
-    // Error - Value out of range
-    if (value>MAX_int16_T){command.error = 4;return;}
-  }
-
-  if (count == 0){
-    // Error - Value required
-    command.error = 5;
-    return;
-  }
-      
-  // Apply sign
-  value*= sign;
-
-  // Command with parameter and value
-  if (commands[cindex].callback_function2 != NULL){
-    if (*userCommand == '\n' || *userCommand == '\r'){
-      command.semaphore = 1;
-      command.command_index = cindex;
-      command.param_index   = pindex;
-      command.param_value   = value;
-    }else{
-      command.error = 7; // Error - End of line expected
-    }
-    return;
-  }
-
-  // Uncaught error
-  command.error = 9;
-
 }
 
-void process_debug()
+
+void handle_settings_command(debug_command *command_received, uint8_t usart_idx) {
+    // Default the received command to Success (-1)
+    command_received->error = -1;
+    // 1. Check the GLOBAL semaphore. 
+    // If the main loop hasn't processed the last command, drop this one.
+    if (command.semaphore == 1) return;
+
+    int8_t cindex = command_received->command_index;
+    int8_t pindex = command_received->param_index;
+    int32_t value = command_received->param_value;
+    // 2. Transfer the received command to the global struct safely
+    command = *command_received;
+    command_usart_idx = usart_idx;
+    command_is_binary = 1;
+
+    // --- LOGICAL CHECKS ---
+    if (cindex < 0 || cindex >= COMMAND_SIZE(commands)) {
+        command_received->error = 1;
+    } else if (pindex < -1 || pindex >= PARAM_SIZE(params)) {
+        command_received->error = 2; // Error - Parameter not found
+    } else if (pindex == -1 && commands[cindex].callback_function0 == NULL) {
+        command_received->error = 8; // Error - Parameter expected
+    } else {
+        if (commands[cindex].type == WRITE && params[pindex].type == VARIABLE) {
+            command_received->error = 3; // Error - Cannot WRITE to a VARIABLE
+          } else if (cindex == 3 && (value > params[pindex].max || value < params[pindex].min)) {
+            command_received->error = 4; // Error - Value out of bounds
+        }
+    }
+
+    // --- EXECUTE BINARY COMMAND DIRECTLY ---
+    if (command_received->error == -1) {
+        // We bypass the global semaphore and process_debug() to decouple binary from ASCII
+        if (commands[cindex].type == WRITE) {
+            if (strcmp(commands[cindex].name, "SET") == 0) {
+                setParamValInt(pindex, extToInt(pindex, value));        // Alter value quietly
+                command_received->param_value = getParamValExt(pindex); // Update feedback payload
+            } else if (strcmp(commands[cindex].name, "INIT") == 0) {
+                setParamValInt(pindex, (int32_t) getParamInitInt(pindex));
+                command_received->param_value = getParamValExt(pindex);
+            } else if (strcmp(commands[cindex].name, "SAVE") == 0) {
+                saveAllParamVal();
+            }
+        } else if (commands[cindex].type == READ) {
+            if (strcmp(commands[cindex].name, "GET") == 0) {
+                command_received->param_value = getParamValExt(pindex);
+            }
+        }
+    }
+
+    // --- SEND BINARY FEEDBACK ---
+    send_parameter_setting_feedback(command_received, usart_idx);
+    // 3. Trigger the global semaphore so the main loop knows it has work to do
+    command.semaphore = 1;
+}
+
+void process_serial_commands()
 {
-  
-  // Print parameters from watch list
-  printParamVal();
-
-  // Show Error if any
-  if(command.error> 0){
-    printError(command.error);
-    command.error = 0;
-    return;
-  }
-
   // Nothing to do
   if (command.semaphore == 0) return;
 
-  int8_t ret = 0;
-  if (commands[command.command_index].callback_function0 != NULL && 
-      command.param_index == -1){
-    // This function needs no parameter
-    ret = (*commands[command.command_index].callback_function0)();
-    if (ret==1){printf("OK\r\n");}
-    command.semaphore = 0;
-    return;
+  if (command_is_binary == 1) {
+      // Check if UART is ready before executing the command to prevent deadlock and dropped ACKs
+      if (command_usart_idx == 2) {
+          #if defined(CONTROL_SERIAL_USART2)
+          if (huart2.gState != HAL_UART_STATE_READY) return;
+          #endif
+      } else if (command_usart_idx == 3) {
+          #if defined(CONTROL_SERIAL_USART3)
+          if (huart3.gState != HAL_UART_STATE_READY) return;
+          #endif
+      }
+
+      // Default the received command to Success (-1)
+      command.error = -1;
+
+      int8_t cindex = command.command_index;
+      int8_t pindex = command.param_index;
+      int32_t value = command.param_value;
+
+      // --- LOGICAL CHECKS ---
+      if (cindex < 0 || cindex >= COMMAND_SIZE(commands)) {
+          command.error = 1;
+      } else if (pindex < -1 || pindex >= PARAM_SIZE(params)) {
+          command.error = 2; // Error - Parameter not found
+      } else if (pindex == -1 && commands[cindex].callback_function0 == NULL) {
+          command.error = 8; // Error - Parameter expected
+      } else {
+          if (commands[cindex].type == WRITE && params[pindex].type == VARIABLE) {
+              command.error = 3; // Error - Cannot WRITE to a VARIABLE
+          } else if (strcmp(commands[cindex].name, "SET") == 0 && (value > params[pindex].max || value < params[pindex].min)) {
+              command.error = 4; // Error - Value out of bounds
+          }
+      }
+
+      // --- EXECUTE BINARY COMMAND DIRECTLY ---
+      if (command.error == -1) {
+          // We execute quietly to decouple binary from ASCII
+          if (commands[cindex].type == WRITE) {
+              if (cindex == 3) { // SET
+                  setParamValInt(pindex, extToInt(pindex, value));        // Alter value quietly
+                  command.param_value = getParamValExt(pindex);           // Update feedback payload
+              } else if (cindex == 4) { // INIT
+                  setParamValInt(pindex, (int32_t) getParamInitInt(pindex));
+                  command.param_value = getParamValExt(pindex);
+              } else if (cindex == 5) { // SAVE
+                  // Safety check: writing flash while moving stalls the CPU and crashes
+                  if (speedAvgAbs > 5) {
+                      command.error = 9; // Uncaught/Custom Error: Cannot save while moving
+                  } else {
+                      saveAllParamVal();
+                  }
+              }
+          } else if (commands[cindex].type == READ) {
+              if (strcmp(commands[cindex].name, "GET") == 0) {
+                  command.param_value = getParamValExt(pindex);
+              }
+          }
+      }
+
+      // --- SEND BINARY FEEDBACK ---
+      send_parameter_setting_feedback(&command, command_usart_idx);
+      command_is_binary = 0; // reset flag
+  } 
+  else 
+  {
+      // --- ORIGINAL ASCII COMMAND EXECUTION ---
+      #if defined(DEBUG_SERIAL_PROTOCOL)
+      // Show Error if any (from ASCII terminal)
+      if(command.error > 0){
+        printError(command.error);
+        command.error = 0;
+        command.semaphore = 0;
+        return;
+      }
+
+      int8_t ret = 0;
+      if (commands[command.command_index].callback_function0 != NULL && 
+          command.param_index == -1){
+        // This function needs no parameter
+        ret = (*commands[command.command_index].callback_function0)();
+        if (ret==1){printf("OK\r\n");}
+      }
+      else if (commands[command.command_index].callback_function1 != NULL &&
+          command.param_index != -1){
+        // This function needs only a parameter
+        ret = (*commands[command.command_index].callback_function1)(command.param_index);
+        if (ret==1){printf("OK\r\n");}
+      }  
+      else if (commands[command.command_index].callback_function2 != NULL && 
+          command.param_index != -1){
+        // This function needs an additional parameter
+        ret = (*commands[command.command_index].callback_function2)(command.param_index,command.param_value);
+        if (ret==1){printf("OK\r\n");}
+      }
+      #endif
   }
 
-  if (commands[command.command_index].callback_function1 != NULL &&
-      command.param_index != -1){
-    // This function needs only a parameter
-    ret = (*commands[command.command_index].callback_function1)(command.param_index);
-    if (ret==1){printf("OK\r\n");}
-    command.semaphore = 0;
-    return;
-  }  
-
-  if (commands[command.command_index].callback_function2 != NULL && 
-      command.param_index != -1){
-    // This function needs an additional parameter
-    ret = (*commands[command.command_index].callback_function2)(command.param_index,command.param_value);
-    if (ret==1){printf("OK\r\n");}
-    command.semaphore = 0;
-  }
+  command.semaphore = 0; // release semaphore allowing next command
 }
-
-#endif
-#endif  // DEBUG_SERIAL_PROTOCOL
-

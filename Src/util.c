@@ -171,6 +171,7 @@ static uint32_t Sideboard_R_len = sizeof(Sideboard_R);
 #if defined(CONTROL_SERIAL_USART2)
 static SerialCommand commandL;
 static SerialCommand commandL_raw;
+static debug_command debugL_raw;
 static uint32_t commandL_len = sizeof(commandL);
   #ifdef CONTROL_IBUS
   static uint16_t ibusL_captured_value[IBUS_NUM_CHANNELS];
@@ -180,6 +181,7 @@ static uint32_t commandL_len = sizeof(commandL);
 #if defined(CONTROL_SERIAL_USART3)
 static SerialCommand commandR;
 static SerialCommand commandR_raw;
+static debug_command debugR_raw;
 static uint32_t commandR_len = sizeof(commandR);
   #ifdef CONTROL_IBUS
   static uint16_t ibusR_captured_value[IBUS_NUM_CHANNELS];
@@ -416,13 +418,45 @@ void UART_DisableRxErrors(UART_HandleTypeDef *huart)
 
 /* =========================== General Functions =========================== */
 
+typedef struct {
+    uint8_t divider;      // Values 1-8 (1 is highest pitch), 0 for rest
+    uint16_t duration_ms; // Duration in milliseconds
+} Note_t;
+
 void poweronMelody(void) {
-    buzzerCount = 0;  // prevent interraction with beep counter
-    for (int i = 8; i >= 0; i--) {
-      buzzerFreq = (uint8_t)i;
-      HAL_Delay(100);
+    buzzerCount = 0;  // prevent interaction with beep counter
+    
+    // "Ta da da, Te de de, Ti di di"
+    // Three triplet bursts ascending in pitch
+    Note_t melody[] = {
+        // "Ta da da" (Low pitch)
+        {8, 50}, {0, 100},
+        {7, 50}, {0, 100},
+        {6, 50}, {0, 100}, // 100ms breath between groups
+        
+        {7, 50}, {0, 100},
+        {6, 50}, {0, 100},
+        {5, 50}, {0, 100}, // 100ms breath between groups
+        
+        
+        {4, 50}, {0, 100},
+        {3, 50}, {0, 100}, // 100ms breath between groups
+        {2, 50}, {0, 100},
+        
+        {3, 50}, {0, 100},
+        {2, 50}, {0, 100}, // 100ms breath between groups
+        {1, 50}, {0, 100},
+        
+    };
+
+    int numNotes = sizeof(melody) / sizeof(melody[0]);
+
+    for (int i = 0; i < numNotes; i++) {
+        buzzerFreq = melody[i].divider;
+        HAL_Delay(melody[i].duration_ms);
     }
-    buzzerFreq = 0;
+    
+    buzzerFreq = 0; // Ensure buzzer is silenced at the end
 }
 
 void beepCount(uint8_t cnt, uint8_t freq, uint8_t pattern) {
@@ -1121,6 +1155,17 @@ void usart2_rx_check(void)
         memcpy(ptr, &rx_buffer_L[0], pos);                              // Copy remaining data
       }
       usart_process_command(&commandL_raw, &commandL, 2);               // Process data
+    } else if (pos > old_pos && (pos - old_pos) == sizeof(debug_command)){
+      memcpy(&debugL_raw, &rx_buffer_L[old_pos], sizeof(debug_command));
+      usart_process_command((SerialCommand *)&debugL_raw, &commandL, 2);
+    } else if ((rx_buffer_L_len - old_pos + pos) == sizeof(debug_command)){
+      uint8_t *debug_ptr = (uint8_t *)&debugL_raw;
+      memcpy(debug_ptr, &rx_buffer_L[old_pos], rx_buffer_L_len - old_pos);    // First copy data from the end of buffer
+      if (pos > 0) {                                                    // Check and continue with beginning of buffer
+        debug_ptr += rx_buffer_L_len - old_pos;                         // Move to correct position in debugL_raw
+        memcpy(debug_ptr, &rx_buffer_L[0], pos);                        // Copy remaining data
+      }
+      usart_process_command((SerialCommand *)&debugL_raw, &commandL, 2);
     }
   }
   #endif // CONTROL_SERIAL_USART2
@@ -1189,6 +1234,17 @@ void usart3_rx_check(void)
         memcpy(ptr, &rx_buffer_R[0], pos);                              // Copy remaining data
       }
       usart_process_command(&commandR_raw, &commandR, 3);               // Process data
+    } else if (pos > old_pos && (pos - old_pos) == sizeof(debug_command)){
+      memcpy(&debugR_raw, &rx_buffer_R[old_pos], sizeof(debug_command));
+      usart_process_command((SerialCommand *)&debugR_raw, &commandR, 3);
+    } else if ((rx_buffer_R_len - old_pos + pos) == sizeof(debug_command)){
+      uint8_t *debug_ptr = (uint8_t *)&debugR_raw;
+      memcpy(debug_ptr, &rx_buffer_R[old_pos], rx_buffer_R_len - old_pos);    // First copy data from the end of buffer
+      if (pos > 0) {                                                    // Check and continue with beginning of buffer
+        debug_ptr += rx_buffer_R_len - old_pos;                         // Move to correct position in debugR_raw
+        memcpy(debug_ptr, &rx_buffer_R[0], pos);                        // Copy remaining data
+      }
+      usart_process_command((SerialCommand *)&debugR_raw, &commandR, 3);
     }
   }
   #endif // CONTROL_SERIAL_USART3
@@ -1247,7 +1303,7 @@ void usart_process_debug(uint8_t *userCommand, uint32_t len)
       debug_buffer[pos++] = userCommand[i];
       if (userCommand[i] == '\n' || userCommand[i] == '\r') {
         state = WAIT_START;
-        handle_input(debug_buffer, pos);
+        //handle_input(debug_buffer, pos);
         continue;
       }
       
@@ -1261,6 +1317,10 @@ void usart_process_debug(uint8_t *userCommand, uint32_t len)
 
 #endif // SERIAL_DEBUG
 
+/*
+ * Process command Rx data
+ * - if the command_in data is valid (correct START_FRAME and checksum) copy the command_in to command_out
+ */
 /*
  * Process command Rx data
  * - if the command_in data is valid (correct START_FRAME and checksum) copy the command_in to command_out
@@ -1307,6 +1367,28 @@ void usart_process_command(SerialCommand *command_in, SerialCommand *command_out
         timeoutCntSerial_R = 0;         // Reset timeout counter
         #endif
       }
+    }
+  } else {
+    // 1. Get mem address of the pointer & apply the structure debug_command
+    debug_command *dbg_cmd = (debug_command *)command_in;
+
+    // 2. Check if the start frame is SERIAL_START_FRAME
+    if (dbg_cmd->packet_start == SERIAL_SETTINGS_FRAME) {
+        
+    // 3. Check if the end SUMS correctly
+        uint8_t *ptr = (uint8_t *)dbg_cmd;
+        uint16_t calculated_sum = 0;
+
+        // Sum all bytes EXCEPT the trailing checksum field
+        size_t payload_size = sizeof(debug_command) - sizeof(dbg_cmd->checksum);
+        for(size_t i = 0; i < payload_size; i++) {
+            calculated_sum += ptr[i];
+        }
+
+        // 4. Strict 16-bit comparison
+        if (calculated_sum == dbg_cmd->checksum) {
+                handle_settings_command(dbg_cmd, usart_idx);
+        }
     }
   }
   #endif
@@ -1784,5 +1866,3 @@ void multipleTapDet(int16_t u, uint32_t timeNow, MultipleTap *x) {
   x->b_hysteresis 	= b_hyst;
   x->t_timePrev 	  = t_time;
 }
-
-

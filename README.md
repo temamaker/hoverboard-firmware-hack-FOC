@@ -8,6 +8,12 @@ This repository implements Field Oriented Control (FOC) for stock hoverboards. C
  - smooth torque output and improved motor efficiency. Thus, lower energy consumption
  - field weakening to increase maximum speed range
 
+### Fork Enhancements: Robust Telemetry & ESP32 C++ API
+This fork introduces a completely overhauled, non-blocking Bidirectional UART Protocol tailored for Master/Slave robotic systems:
+- **Multiplexed UART commands:** The hoverboard can now handle high-frequency 50Hz telemetry and control streams at the same time, on the same UART channel.
+- **Live Parameter Editing:** Safely `GET`, `SET`, `INIT`, and `SAVE` settings to EEPROM on the fly while simultaneously driving and receiving telemetry.
+- **HoverboardAPI C++ Library:** Includes a foolproof Arduino/ESP32 C++ library (`HoverboardAPI.h`) with human-readable enums, hardware buffer protection, and built-in sliding-window parsers. Check the `docs/sample_sketches/` folder for plug-and-play interactive examples!
+
 Table of Contents
 =======================
 

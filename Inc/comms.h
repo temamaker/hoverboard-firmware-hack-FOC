@@ -23,8 +23,6 @@
 
 #include "stm32f1xx_hal.h"
 
-#if defined(DEBUG_SERIAL_PROTOCOL)
-
 enum types {UINT8_T,UINT16_T,UINT32_T,INT8_T,INT16_T,INT32_T,INT,FLOAT};
 #define typename(x) _Generic((x), \
     uint8_t:    UINT8_T, \
@@ -67,18 +65,24 @@ int8_t watchParamVal(uint8_t index);
 
 int8_t findCommand(uint8_t *userCommand, uint32_t len);
 int8_t findParam(uint8_t *userCommand, uint32_t len);
-void handle_input(uint8_t *userCommand, uint32_t len);
-void process_debug();
+
+void process_serial_commands();
+
 
 
 typedef struct debug_command_struct debug_command;
 struct debug_command_struct {
+  int16_t packet_start;
   uint8_t semaphore;
-  uint8_t error;
+  int8_t error;
   int8_t command_index;
   int8_t param_index;
   int32_t param_value;
-};
+  uint16_t checksum;
+} __attribute__((packed));
+
+void handle_settings_command(debug_command *command_received, uint8_t usart_idx);
+void send_parameter_setting_feedback(debug_command *cmd, uint8_t usart_idx);
 
 typedef struct command_entry_struct command_entry;
 struct command_entry_struct {
@@ -109,5 +113,4 @@ struct parameter_entry_struct {
   const char *help;
 };
 
-#endif  // DEBUG_SERIAL_PROTOCOL
 #endif  // COMMS_H

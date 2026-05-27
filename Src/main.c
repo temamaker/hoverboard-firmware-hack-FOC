@@ -117,17 +117,44 @@ int16_t cmdR;                    // global variable for Right Command
 // Local variables
 //------------------------------------------------------------------------
 #if defined(FEEDBACK_SERIAL_USART2) || defined(FEEDBACK_SERIAL_USART3)
-typedef struct{
-  uint16_t  start;
-  int16_t   cmd1;
-  int16_t   cmd2;
-  int16_t   speedR_meas;
-  int16_t   speedL_meas;
-  int16_t   batVoltage;
-  int16_t   boardTemp;
-  uint16_t  cmdLed;
-  uint16_t  checksum;
-} SerialFeedback;
+typedef struct {
+  uint16_t start;
+  int16_t  ctrl_mod;
+  int16_t  ctrl_typ;
+  int16_t  i_mot_max;
+  int16_t  n_mot_max;
+  int16_t  fi_weak_ena;
+  int16_t  fi_weak_hi;
+  int16_t  fi_weak_lo;
+  int16_t  fi_weak_max;
+  int16_t  pha_adv_max;
+  int16_t  in1_raw;
+  int16_t  in1_typ;
+  int16_t  in1_min;
+  int16_t  in1_mid;
+  int16_t  in1_max;
+  int16_t  in1_cmd;
+  int16_t  in2_raw;
+  int16_t  in2_typ;
+  int16_t  in2_min;
+  int16_t  in2_mid;
+  int16_t  in2_max;
+  int16_t  in2_cmd;
+  int16_t  dc_curr;
+  int16_t  rdc_curr;
+  int16_t  ldc_curr;
+  int16_t  cmdl;
+  int16_t  cmdr;
+  int16_t  spd_avg;
+  int16_t  spdl;
+  int16_t  spdr;
+  int16_t  rate;
+  int16_t  spd_coef;
+  int16_t  str_coef;
+  int16_t  batv;
+  int16_t  temp;
+  uint16_t checksum;
+} __attribute__((packed)) SerialFeedback;
 static SerialFeedback Feedback;
 #endif
 #if defined(FEEDBACK_SERIAL_USART2)
@@ -170,7 +197,7 @@ static uint16_t rate = RATE; // Adjustable rate to support multiple drive modes 
 #endif
 
 
-int main(void) {
+int main(void){
 
   HAL_Init();
   __HAL_RCC_AFIO_CLK_ENABLE();
@@ -253,6 +280,8 @@ int main(void) {
 
     readCommand();                        // Read Command: input1[inIdx].cmd, input2[inIdx].cmd
     calcAvgSpeed();                       // Calculate average measured speed: speedAvg, speedAvgAbs
+
+    process_serial_commands();            // Execute settings and binary commands
 
     #ifndef VARIANT_TRANSPOTTER
       // ####### MOTOR ENABLING: Only if the initial input is very small (for SAFETY) #######
@@ -439,7 +468,6 @@ int main(void) {
               nunchuk_connected = 0;
 	    }
           }
-        }   
       #endif
 
       #ifdef SUPPORT_LCD
@@ -491,7 +519,7 @@ int main(void) {
     #if defined(DEBUG_SERIAL_USART2) || defined(DEBUG_SERIAL_USART3)
       if (main_loop_counter % 25 == 0) {    // Send data periodically every 125 ms      
         #if defined(DEBUG_SERIAL_PROTOCOL)
-          process_debug();
+          printParamVal();
         #else
           printf("in1:%i in2:%i cmdL:%i cmdR:%i BatADC:%i BatV:%i TempADC:%i Temp:%i \r\n",
             input1[inIdx].raw,        // 1: INPUT1
@@ -506,35 +534,71 @@ int main(void) {
       }
     #endif
 
-    // ####### FEEDBACK SERIAL OUT #######
-    #if defined(FEEDBACK_SERIAL_USART2) || defined(FEEDBACK_SERIAL_USART3)
-      if (main_loop_counter % 2 == 0) {    // Send data periodically every 10 ms
-        Feedback.start	        = (uint16_t)SERIAL_START_FRAME;
-        Feedback.cmd1           = (int16_t)input1[inIdx].cmd;
-        Feedback.cmd2           = (int16_t)input2[inIdx].cmd;
-        Feedback.speedR_meas	  = (int16_t)rtY_Right.n_mot;
-        Feedback.speedL_meas	  = (int16_t)rtY_Left.n_mot;
-        Feedback.batVoltage	    = (int16_t)batVoltageCalib;
-        Feedback.boardTemp	    = (int16_t)board_temp_deg_c;
 
-        #if defined(FEEDBACK_SERIAL_USART2)
-          if(__HAL_DMA_GET_COUNTER(huart2.hdmatx) == 0) {
-            Feedback.cmdLed     = (uint16_t)sideboard_leds_L;
-            Feedback.checksum   = (uint16_t)(Feedback.start ^ Feedback.cmd1 ^ Feedback.cmd2 ^ Feedback.speedR_meas ^ Feedback.speedL_meas 
-                                           ^ Feedback.batVoltage ^ Feedback.boardTemp ^ Feedback.cmdLed);
+  // ####### FEEDBACK SERIAL OUT #######
+  #if defined(FEEDBACK_SERIAL_USART2) || defined(FEEDBACK_SERIAL_USART3)
+    if (main_loop_counter % 4 == 0) {    // Send data periodically every 20 ms (50Hz)
+      Feedback.start	        = (uint16_t)SERIAL_START_FRAME;
+        Feedback.ctrl_mod       = (int16_t)getParamValExt(0);
+        Feedback.ctrl_typ       = (int16_t)getParamValExt(1);
+        Feedback.i_mot_max      = (int16_t)getParamValExt(2);
+        Feedback.n_mot_max      = (int16_t)getParamValExt(3);
+        Feedback.fi_weak_ena    = (int16_t)getParamValExt(4);
+        Feedback.fi_weak_hi     = (int16_t)getParamValExt(5);
+        Feedback.fi_weak_lo     = (int16_t)getParamValExt(6);
+        Feedback.fi_weak_max    = (int16_t)getParamValExt(7);
+        Feedback.pha_adv_max    = (int16_t)getParamValExt(8);
+        Feedback.in1_raw        = (int16_t)getParamValExt(9);
+        Feedback.in1_typ        = (int16_t)getParamValExt(10);
+        Feedback.in1_min        = (int16_t)getParamValExt(11);
+        Feedback.in1_mid        = (int16_t)getParamValExt(12);
+        Feedback.in1_max        = (int16_t)getParamValExt(13);
+        Feedback.in1_cmd        = (int16_t)getParamValExt(14);
+        Feedback.in2_raw        = (int16_t)getParamValExt(15);
+        Feedback.in2_typ        = (int16_t)getParamValExt(16);
+        Feedback.in2_min        = (int16_t)getParamValExt(17);
+        Feedback.in2_mid        = (int16_t)getParamValExt(18);
+        Feedback.in2_max        = (int16_t)getParamValExt(19);
+        Feedback.in2_cmd        = (int16_t)getParamValExt(20);
+        Feedback.dc_curr        = (int16_t)getParamValExt(21);
+        Feedback.rdc_curr       = (int16_t)getParamValExt(22);
+        Feedback.ldc_curr       = (int16_t)getParamValExt(23);
+        Feedback.cmdl           = (int16_t)getParamValExt(24);
+        Feedback.cmdr           = (int16_t)getParamValExt(25);
+        Feedback.spd_avg        = (int16_t)getParamValExt(26);
+        Feedback.spdl           = (int16_t)getParamValExt(27);
+        Feedback.spdr           = (int16_t)getParamValExt(28);
+        Feedback.rate           = (int16_t)getParamValExt(29);
+        Feedback.spd_coef       = (int16_t)getParamValExt(30);
+        Feedback.str_coef       = (int16_t)getParamValExt(31);
+        Feedback.batv           = (int16_t)getParamValExt(32);
+        Feedback.temp           = (int16_t)getParamValExt(33);
 
-            HAL_UART_Transmit_DMA(&huart2, (uint8_t *)&Feedback, sizeof(Feedback));
+      #if defined(FEEDBACK_SERIAL_USART2)
+        if(huart2.gState == HAL_UART_STATE_READY) {
+          uint8_t *ptr = (uint8_t *)&Feedback;
+          uint16_t calculated_sum = 0;
+          size_t payload_size = sizeof(SerialFeedback) - sizeof(Feedback.checksum);
+          for(size_t i = 0; i < payload_size; i++) {
+              calculated_sum += ptr[i];
           }
-        #endif
-        #if defined(FEEDBACK_SERIAL_USART3)
-          if(__HAL_DMA_GET_COUNTER(huart3.hdmatx) == 0) {
-            Feedback.cmdLed     = (uint16_t)sideboard_leds_R;
-            Feedback.checksum   = (uint16_t)(Feedback.start ^ Feedback.cmd1 ^ Feedback.cmd2 ^ Feedback.speedR_meas ^ Feedback.speedL_meas 
-                                           ^ Feedback.batVoltage ^ Feedback.boardTemp ^ Feedback.cmdLed);
+          Feedback.checksum = calculated_sum;
 
+          HAL_UART_Transmit_DMA(&huart2, (uint8_t *)&Feedback, sizeof(Feedback));
+        }
+      #endif
+      #if defined(FEEDBACK_SERIAL_USART3)
+        if(huart3.gState == HAL_UART_STATE_READY) {
+          uint8_t *ptr = (uint8_t *)&Feedback;
+          uint16_t calculated_sum = 0;
+          size_t payload_size = sizeof(SerialFeedback) - sizeof(Feedback.checksum);
+          for(size_t i = 0; i < payload_size; i++) {
+              calculated_sum += ptr[i];
+          }
+          Feedback.checksum = calculated_sum;
             HAL_UART_Transmit_DMA(&huart3, (uint8_t *)&Feedback, sizeof(Feedback));
-          }
-        #endif
+        }
+      #endif
       }
     #endif
 
@@ -603,15 +667,18 @@ int main(void) {
     inIdx_prev = inIdx;
     buzzerTimer_prev = buzzerTimer;
     main_loop_counter++;
-    }
+  
   }
+ 
+  }
+  
 }
 
 
 // ===========================================================
 /** System Clock Configuration
 */
-void SystemClock_Config(void) {
+void SystemClock_Config(void){
   RCC_OscInitTypeDef RCC_OscInitStruct;
   RCC_ClkInitTypeDef RCC_ClkInitStruct;
   RCC_PeriphCLKInitTypeDef PeriphClkInit;
